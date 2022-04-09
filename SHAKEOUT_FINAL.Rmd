@@ -1,0 +1,114 @@
+---
+title: "SHAKEOUT"
+output:
+  html_document:
+    editor_options: null
+    smart: no
+  pdf_document: default
+  chunk_output_type: inline
+---
+Load Libraries:
+```{r message=F, warning=F}
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(mapdata)
+library(tinytex)
+library(sjstats)
+library("maptools")
+library("raster")
+library("DescTools")
+library("fitdistrplus")
+library(gridExtra)
+library(GISTools)
+library(rgdal)
+library(rio)
+memory.limit(size=50000)
+```
+1. Initialize the shpfile for the tests and calculate fields: 
+```{r}
+calc <- readOGR(dsn="C:/Shakeout", layer="FINAL_RISK_CALC")  
+```
+2. Parameters
+```{r}
+#Restoration Times for Power from scneario, defualted at Shakeout
+
+P_POWER_S <- 1
+P_POWER_M <- .95
+P_POWER_E <- .49
+P_POWER_c <- .04 
+
+#defualt Shakout
+
+qScale <- 0.09005686 
+
+#Bridge complete damage mean from NBI analysis
+P_BRIDGE_C <- 1.2
+
+#Pipes
+P_PIPES_SD <- .85
+P_PIPES_MEAN <- .1 
+
+# export file
+afile <- "FINAL.dbf"
+```
+3. Run Physical Vulnerability Model
+```{r}
+calc <- as.data.frame(calc)
+calc <- calc %>% mutate(POWER_S = plnorm(calc$PGA, meanlog = log(.15), sdlog = .6))
+calc <- calc %>% mutate(POWER_M = plnorm(calc$PGA, meanlog = log(.25), sdlog = .5))
+calc <- calc %>% mutate(POWER_E = plnorm(calc$PGA, meanlog = log(.35), sdlog = .4))
+calc <- calc %>% mutate(POWER_C = plnorm(calc$PGA, meanlog = log(.7), sdlog = .4))
+
+#Now we calcualte the expected power damage probability
+
+calc <- calc %>% mutate(P_OUTAGE = 1-((1- calc$POWER_S) + P_POWER_S*(calc$POWER_S - calc$POWER_M)+ P_POWER_M*( calc$POWER_M - calc$POWER_E) + P_POWER_E*(calc$POWER_E - calc$POWER_C) + P_POWER_c* calc$POWER_C))
+
+#Calculate BRIDGE_DAMAGE
+
+calc <- calc %>% mutate(BRIDGE_C = plnorm(calc$SA10, meanlog = log(P_BRIDGE_C), sdlog = .6))
+
+#Road and Rail Damage
+
+calc <- calc %>% mutate(ROAD_C = 0.000000005*calc$MMI^(7.7086))
+calc <- calc %>% mutate(RAIL_C = 0.0000003*calc$MMI^(6.0707))
+
+#Trans disruption
+
+calc <- calc %>% mutate(TRANS_D = 1 - ((1 - calc$ROAD_C)*(1 - calc$RAIL_C)*(1 - calc$BRIDGE_C)))
+
+#Calculate Water pipe conveyance damage
+
+calc <- calc %>% mutate(BREAK_R_E = 0.7*0.15*0.003623*0.39370079*calc$PGV*3.2808) 
+
+calc <- calc %>% mutate(W_OUTAGE_E = pnorm(log(calc$BREAK_R_E), mean = log(P_PIPES_MEAN), sd = P_PIPES_SD))
+
+# calculate the hazard maximum ENTROPY DISTIRBUTION
+
+temp_c <- calc[, c("P_OUTAGE", "TRANS_D", "W_OUTAGE_E")]
+calc$PHYS_V <- as.vector(apply(X=temp_c, MARGIN=1, FUN=max))#
+```
+3. Run Social Vulnerability Model
+```{r}
+
+#THE WEIGHTING BY FEATURE SCALING
+
+calc <- calc %>% mutate(weighting_F = (0.75 + ((calc$FI_INDEX - min(calc$FI_INDEX))*(0.5))/(max(calc$FI_INDEX)- min(calc$FI_INDEX))))
+
+calc <- calc %>% mutate(COM_V = calc$PHYS_V*calc$weighting_F) #*sd(calc$qfactor)
+
+calc <- calc %>% mutate(COM_V = (min(calc$COM_V) + ((calc$COM_V - min(calc$COM_V))*(1 -min(calc$COM_V)))/(max(calc$COM_V)- min(calc$COM_V)))) #rescale the tail
+
+calc$COM_V[calc$COM_V == 1]<- .999999
+
+calc <- calc %>% mutate(RISK_POP = floor(calc$COM_V*calc$POP_2015)) #floor round
+
+sum(calc$RISK_POP)
+sum(calc$RISK_POP)/sum(calc$POP_2015)
+```
+
+```{r}
+export(calc[,c( "KEY", "POP_2015", "PGA", "PGV", "MMI", "SA10", "FI_INDEX", "SOVI0610CA", "coords.x1", "coords.x2", "P_OUTAGE", "BRIDGE_C", "ROAD_C", "RAIL_C", "TRANS_D", "BREAK_R_E", "W_OUTAGE_E", "PHYS_V",  "COM_V", "RISK_POP")], "FINAL.dbf", format = "dbf")
+```
+
+
